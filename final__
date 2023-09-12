@@ -1,0 +1,339 @@
+
+%macro trigger;
+
+/*Macro to change the type of the SUBJID to Char in all datasets*/
+%n_to_c;
+
+/* Invoking macro to get all the SUBJID */
+%u_getallsub;
+
+
+/*importing the metadata and study specific checks*/
+
+%if %sysfunc(fileexist(&std_spec.)) %then %do; 
+
+	proc import datafile=&std_spec.
+				out=macro dbms=xlsx replace;
+	run;
+
+	data macro;
+	length domain $10. macro $100.;
+	set macro;
+	_SEQ=_n_;
+	run;
+
+	proc sort data=macro;
+	by macro domain data;
+	run;
+
+/*Added Section for Inlcuding parameter variable from Global Library file*/
+	proc import datafile='xxx.xlsx'
+            out=p21_meta dbms=xlsx replace;
+            sheet='Pinnacle_Meta';
+	run;
+
+	proc sort data=p21_meta;
+	by macro domain data;
+	run;
+
+	data macro;
+		merge macro(in=a) p21_meta(in=b keep=macro data domain param_var);
+		by macro domain data;
+		if a;
+		if a and b then do;
+			if param_var='NA' then delete;
+			data=strip(catx(',',domain,data,param_var));
+		end;
+		drop domain param_var;
+	run;
+
+	
+	proc sort data=macro out=macro(drop=_seq);
+	by _seq;
+	run;
+
+%end;
+
+%else %do;
+
+proc import datafile='xx.xlsx'
+				out=macro dbms=xlsx replace;
+	run;
+
+%end;
+
+
+/*including only required checks*/
+
+/*libname out 'xxx';*/
+
+/**************************/
+
+proc sql;
+	select count(*) into:n from macro;
+	select macro into:m1-:m%left(&n) from macro;
+	select data into:d1-:d%left(&n) from macro;
+quit;
+
+%collab;
+
+%n_to_c_all;
+
+/*To get the list of all the existing datasets and merge them to form a final dataset*/
+
+proc sql;
+	select distinct substr(strip(macro),3) into: dataset separated by ' ' from macro;
+quit;
+
+options varlenchk=nowarn;
+
+data final;
+	length domain item_oid src $200.;
+	set &dataset.;
+	subjid=compress(subjid);
+	error=compress(error);
+run;
+
+options varlenchk=warn;
+
+/*****************************************************************************************
+This step imports the MDVP file and joins to get all required variables from MDVP
+Adding the Correct source in the dataset
+******************************************************************************************/
+
+proc import datafile='xxx.xlsx'
+			out=mdv_CRF dbms=xlsx replace;
+			sheet='CRF';
+run;
+proc import datafile='xxx.xlsx'
+			out=mdv_NCRF dbms=xlsx replace;
+			sheet='NON-CRF';
+run;
+proc import datafile='xxx.xlsx'
+            out=mdvp_p21 dbms=xlsx replace;
+            sheet='Pinnacle';
+run;
+
+data mdv;
+	length reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.	;
+	format reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+	set mdv_CRF mdvp_P21(keep=reference_id FDA_Validator_Rule_Description) indsname=src_name;
+
+	check="mDVP";
+	
+	if src_name="WORK.MDVP_P21" then check ="P21";
+
+run;
+	
+
+%if %sysfunc(fileexist(&std_spec.)) %then %do; 
+
+	proc import datafile=&std_issue
+				out=stud_desc dbms=xlsx replace;			
+	run;
+
+	data stud_desc;
+		length reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+		format reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+		set stud_desc;
+		check="STUDY";
+	run;
+
+/*	added to pull latest meta data from study issue*/
+
+	proc sql;
+		create table mdv_1 as
+		select distinct * from mdv 
+		where reference_id not in (select distinct reference_id from stud_desc);
+	quit;
+
+
+	data mdv ;
+		length reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+		format reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+		set mdv_1 stud_desc;
+	run;
+
+
+%end;
+
+proc sort data=mdv ;
+by reference_id ;
+run;
+
+data mdva mdvb;
+length reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+format reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+set mdv;
+by reference_id ;
+if first.reference_id and last.reference_id then output mdva;
+else output mdvb;
+run;
+
+
+
+proc contents data=work._all_  memtype=data out=src;
+run;
+
+proc sql noprint;
+select DISTINCT "'"||STRIP(memname)||"'" into :to_check separated by ','
+from src
+where libname = 'WORK' ;
+quit;
+
+%PUT &to_check.;
+
+PROC SQL;
+CREATE TABLE mdvc as
+(
+	SELECT * FROM mdvb 
+    where source in (&to_check)
+);
+QUIT;
+
+data mdv_NCRF;
+	length reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+	format reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+	set mdv_NCRF;
+	check="mDVP";
+run;
+data mdv;
+length reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+format reference_id $50. check $20. source $50. Valid_Data_Condition_Definition $2500. item_oid $50.;
+set mdva mdvc mdv_NCRF;
+run;
+
+proc sort data=mdv out=mdvp nodupkey;
+by reference_id ;
+run;
+
+/********************************/
+/**Adding data step to add domain variable from MDVP sheet**/
+data mdvp(rename=(domain_=domain));
+		set mdvp;
+		length domain_ $10.;
+		domain_=scan(domain,1,'(');
+		drop domain;
+run;
+
+proc sql;
+	create table final_all_v1 as
+	select distinct COALESCE(b.domain, a.domain) as domain,
+                                        COALESCE(b.source, a.src) as source,
+                                        COALESCE(b.item_oid, a.item_oid) as item_oid,
+                                        coalesce(b.valid_data_condition_definition,b.FDA_Validator_Rule_Description) as issue_description,
+                                        b.check,
+                                        a.*
+	from final a
+	left join mdvp b on a.issue=b.reference_id;
+quit;
+
+%pass;
+
+options varlenchk=nowarn;
+
+data final_all;
+	set final_all_v1 pass_all;
+run; 
+
+options varlenchk=warn;
+
+%dot_to_zero(final_all);
+
+
+proc sql;
+	create table final_all_v3 as 
+	select a.*,
+		   b.req_var
+
+	from final_all a
+	left join macro b on a.issue=substr(b.Macro,3)                
+	where check ne 'P21'
+union all
+        select a.*,
+                   b.req_var,b.data as SD_data
+        from final_all a
+        left join macro b on a.issue=substr(b.Macro,3)
+                where check eq 'P21' and a.domain=scan(b.data,1,',') and ^missing(a.domain)
+                                        and ^missing(a.SRC)
+                                                and INDEX(B.DATA,scan(a.SRC,1)) NE 0
+;
+quit;
+
+data final_all_v3;
+set final_all_v3 final_all(where=(check eq 'P21' and (missing(domain) OR missing(SRC))));
+run;
+
+%getall(final_all_v3);
+
+
+
+proc sql;
+	create table final_all_v4 as
+	select a.*,
+		   count(distinct a.subjid) as count,	
+		   b.site
+	from final_all_v3 a
+	left join a_subjid b on a.subjid=b.subjid;
+quit;
+
+data final_all_v5;
+	set final_all_v4;
+	rename req_var=req_variable txtc=req_value;
+run;
+
+/*addded Macro to convert into lowercases*/
+
+%macro lowercasevar(dsn);
+	%let dsid = %sysfunc(open(&dsn));
+	%let num = %sysfunc(attrn(&dsid,nvars));
+	%put &num;
+
+	data &dsn;
+		set &dsn(rename=(
+						%do i = 1 %to &num;
+							%let var&i = %sysfunc(varname(&dsid,&i));
+							&&var&i = %sysfunc(lowcase(&&var&i))
+						%end;));
+
+		%let close = %sysfunc(close(&dsid));
+	run;
+%mend lowercasevar;
+
+%lowercasevar(final_all_v5);
+
+/*%get_dmcom(indset=final_all_v5,outdset=final_all_v6,filename=&testfile.);*/
+
+data final_all_v6;
+	set final_all_v5;
+	length dm_comment $1000. stats_comment $1000. studyid $30.;
+	studyid="&_study."; *24Oct22: added to pull studyid information into DIVA dashboard;
+	dm_comment= '';
+	stats_comment= '';
+run;
+
+/*************************************************************************************************
+Check if the column "error_description" is present or not in final_all_v6.If not then add it. 
+*************************************************************************************************/
+
+data _null_;
+	%let dsid = %sysfunc(open(final_all_v6));
+	%if %sysfunc(varnum(&dsid,error_description)) = 0 %then %do;
+		%let rc = %sysfunc(close(&dsid));
+		data final_all_v6;
+		set final_all_v6;
+		length error_description $300;
+		error_description = '';
+		run;
+	%end;
+
+run;
+
+
+%if &post=Y %then %do;
+	%include "&post_c";
+%end;
+
+
+%mend trigger;
+
